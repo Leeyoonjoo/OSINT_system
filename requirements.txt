@@ -1,0 +1,7 @@
+sqlalchemy
+pymysql
+python-dotenv
+requests
+celery
+redis
+
