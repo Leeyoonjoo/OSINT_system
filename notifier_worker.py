@@ -6,6 +6,9 @@ from celery import Celery
 from sqlalchemy import text
 from db_info import make_engine
 
+# 전역 초기화
+# .env 로드하고 Redis를 백엔드로 쓰는 Celery 앱 생성
+# DB 연결 엔진 생성 
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -14,7 +17,7 @@ TG_BOT_TOKEN = os.environ["TG_BOT_TOKEN"]
 celery_app = Celery("notifier_worker", broker=REDIS_URL, backend=REDIS_URL)
 engine = make_engine()
 
-
+# 텔레그램 API 호출 - send_notification()내부에서 "전송 단계"때 호출됨.
 def tg_send(chat_id: int, msg: str):
     r = requests.post(
         f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
@@ -24,7 +27,7 @@ def tg_send(chat_id: int, msg: str):
     if r.status_code != 200:
         raise RuntimeError(f"Telegram error: {r.status_code} {r.text}")
 
-
+# 메시지 포맷팅 - send_notification()에서 DB row를 읽어온 뒤 
 def format_msg(v: dict) -> str:
     lines = [
         "🚨 Ransomware Leak Alert 🚨",
@@ -42,8 +45,12 @@ def format_msg(v: dict) -> str:
     lines.append(f"(job_id={v.get('job_id')}, victim_id={v.get('victim_id')})")
     return "\n".join(lines)
 
+# poller가 send_notification.delay(job_id)를 호출하면 worker가 큐에서 가져와서 실행 
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=30)  
+# binf=True는 self로 task context 접근 가능
+# max_retries=3는 총 3번까지 재시도(재시도 횟수)
+# default_retry_delay=30는 retry시 기본 30초 뒤
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_notification(self, job_id: int):
     """
     job_id(=notifications_victims.id)를 받아서:
@@ -52,17 +59,17 @@ def send_notification(self, job_id: int):
     - sent/failed 업데이트
     """
     try:
-        with engine.begin() as conn:
-            # 중복 전송 방지용 sending (여러 worker일 수도 있음!)
+        with engine.begin() as conn:  # 1 트랜잭션 시작
+            # 2 중복 전송 방지용 sending (여러 worker일 수도 있음!)
             upd = conn.execute(text("""
                 UPDATE notifications_victims
                 SET status='sending'
                 WHERE id=:job_id AND status='queued'
             """), {"job_id": job_id})
-            if getattr(upd, "rowcount", 0) == 0:
+            if getattr(upd, "rowcount", 0) == 0:  # rowcount는 이미 누가 가져갔거나(status=sending/sent/failed), 아직 queued가 아닌 상태이면 그냥 종료
                 return
             
-            # 1) job + victim 데이터 조회 (queued 상태만 처리)
+            # 3 job + victim 데이터 조회 (status가 sending 해당)
             row = conn.execute(
                 text(
                     """
@@ -86,29 +93,19 @@ def send_notification(self, job_id: int):
             ).mappings().first()
 
             if not row:
-                # 이미 처리됐거나(=sent/failed) 잘못된 job_id거나 아직 queued가 아님
                 return
             
-            # # 중복 전송 방지용 sending (여러 worker일 수도 있음!)
-            # upd = conn.execute(text("""
-            #     UPDATE notifications_victims
-            #     SET status='sending'
-            #     WHERE id=:job_id AND status='queued'
-            # """), {"job_id": job_id})
-            # if getattr(upd, "rowcount", 0) == 0:
-            #     return
-            
-            # channel_id NULL 이거나 문자열 방지
+            # 4 channel_id 검증
             if row["channel_id"] is None:
                 raise RuntimeError("channel_id is NULL for this job")
             
-            chat_id = int(row["channel_id"])
-            msg = format_msg(dict(row))
-
-            # 2) 텔레그램 전송
+            chat_id = int(row["channel_id"]) # 문자열, None 예외처리
+            
+            # 5 텔레그램 전송
+            msg = format_msg(dict(row)) # 메시지 전송
             tg_send(chat_id, msg)
 
-            # 3) 성공 처리
+            # 6 성공 처리: sending -> sent 으로 status 변경
             conn.execute(
                 text(
                     """
@@ -125,10 +122,12 @@ def send_notification(self, job_id: int):
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
 
-        # 재시도 횟수 확인 (Celery가 self.request.retries에 현재 retry 횟수 들고있음)
-        will_retry = self.request.retries < self.max_retries
+        will_retry = self.request.retries < self.max_retries # 아직 재시도 남아있으면 True, 아니리면 False(최종 failed됨)
 
         with engine.begin() as conn:
+            # 실패 상태 DB 기록
+            # 재시도 남음(will_retry=True) -> status="queued"
+            # 재시도 끝(will_retry=False) -> status="failed"
             conn.execute(text("""
                 UPDATE notifications_victims
                 SET status = :status,
@@ -141,7 +140,7 @@ def send_notification(self, job_id: int):
                 "err": err[:5000],
             })
 
-        if will_retry:
+        if will_retry: # self.retry()를 raise 해야 Celery가 "이건 재시도 대상"으로 인식
             raise self.retry(exc=e)
-        else:
+        else:          # 재시도 없으면 그냥 예외처리돼서 task 실패
             raise
