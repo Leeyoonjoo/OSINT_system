@@ -1,3 +1,12 @@
+## Outline
+한 랜섬웨어 그룹을 타겟팅해서 그룹 활동을 추적하는 시스템입니다.
+알림을 받을 수 있는 정보는 이 그룹이 블로그에 올리는 기업 유출 정보들입니다.
+
+### Key Factor
+1. 실시간 다크웹 크롤링
+2. 데이터 정규화 및 저장
+3. 텔레그램 알림 
+
 ## Architecture
 <img width="816" height="716" alt="image" src="https://github.com/user-attachments/assets/86e31ab0-cdbd-4b9b-abca-ce5985902684" /><br>
 1. notifier_api가 주기적으로 실행한다. (DB 조회/ job 적재)<br>
