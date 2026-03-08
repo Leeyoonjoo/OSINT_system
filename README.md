@@ -11,6 +11,7 @@
 <img width="589" height="160" alt="image" src="https://github.com/user-attachments/assets/b3624dd0-7d56-4597-a70d-40eb70a5f453" /><br>
 Crawler → (insert) → MySQL → (poll) → Notifier API → (enqueue) → Queue → Notifier worker → Telegram or Discord
 
+
 <img width="816" height="716" alt="image" src="https://github.com/user-attachments/assets/86e31ab0-cdbd-4b9b-abca-ce5985902684" /><br>
 1. notifier_api가 주기적으로 실행한다. (DB 조회/ job 적재)<br>
 2. pending job 일부 선택하여 queued로 변경한다 (선점하는 단계)<br>
